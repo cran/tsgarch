@@ -1,3 +1,15 @@
+# tsgarch 1.0.2
+
+* Moved a unit tests back to original folder and added a tolerance
+to the expectation per CRAN maintainers directions.
+
+# tsgarch 1.0.1
+
+* Moved a couple of unit tests to other folder to avoid checking on CRAN
+since the M1 mac had different rounding errors than other architectures
+for simulation tests.
+
+
 # tsgarch 1.0.0
 
 * Initial CRAN submission.
