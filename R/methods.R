@@ -1,27 +1,40 @@
 #' Estimates an GARCH model given a specification object using maximum likelihood and autodiff
 #'
-#' @param object an object of class tsgarch.spec.
+#' @param object an object of class \dQuote{tsgarch.spec} or \dQuote{tsgarch.multispec}
 #' @param control solver control parameters.
 #' @param solver only \dQuote{nloptr} is currently supported (see \code{\link[nloptr]{nloptr}}).
 #' @param stationarity_constraint the bound on the inequality constraint for ensuring
 #' the stationary of the GARCH process (see details).
+#' @param keep_tmb whether to save and return the TMB object. This is can be used for
+#' example when passing different parameters to the model to extract a new output set
+#' given the same dataset (used in \dQuote{tsmarch} package for calculating partitioned standard
+#' errors). The downside is that it can increase the size of the returned object by a
+#' factor of 8.
 #' @param ... not currently used.
-#' @returns An object of class \dQuote{tsgarch.estimate}.
-#' @details The underlying code is written using the TMB framework which uses
+#' @returns An object of class \dQuote{tsgarch.estimate} or \dQuote{tsgarch.multi_estimate}.
+#' @details
+#' The underlying code is written using the TMB framework which uses
 #' automatic differentiation and hence allows the generation of analytic
 #' derivatives.
+#'
 #' Stationarity is usually based on the condition that the persistence of the model
 #' is less than 1. The argument \dQuote{stationarity_constraint} allows to fine tune
 #' this. For example, setting it to a very high value will effectively render
 #' this constraint inactive. The default of 0.999 has been found to be a reasonable
 #' bound since values close to one may lead to problems.
+#'
 #' Since the nloptr solver make use of analytic Jacobians for the inequality constraint,
 #' these are either provided in closed form or calculated as part of the automatic
 #' differentiation algorithms implemented in the package.
+#'
 #' The estimation makes 2 passes to the solver. The first pass uses no parameter
 #' scaling, whilst in the second pass the parameters (as well as bounds) are scaled
 #' making use of the estimated hessian from the first pass in order to generate
 #' a hopefully more robust solution.
+#'
+#' For the multiple specification estimation, parallel functionality is available through
+#' the \code{\link[future.apply]{future_lapply}} function. The user needs to setup a
+#' \code{\link[future]{plan}} in order to make use of this.
 #' @export estimate.tsgarch.spec
 #' @aliases estimate
 #' @method estimate tsgarch.spec
@@ -29,7 +42,7 @@
 #' @author Alexios Galanos
 #' @export
 #'
-estimate.tsgarch.spec <- function(object, solver = "nloptr", control = NULL, stationarity_constraint = 0.999, ...)
+estimate.tsgarch.spec <- function(object, solver = "nloptr", control = NULL, stationarity_constraint = 0.999, keep_tmb = FALSE, ...)
 {
     # check for all fixed
     all_fixed_pars <- sum(object$parmatrix$estimate)
@@ -40,12 +53,12 @@ estimate.tsgarch.spec <- function(object, solver = "nloptr", control = NULL, sta
     }
     if (is.null(control)) control <- nloptr_fast_options(trace = FALSE)
     start_timer <- Sys.time()
-    out <- .estimate_garch_model(object, solver, control, stationarity_constraint, ...)
+    out <- .estimate_garch_model(object, solver, control, stationarity_constraint, keep_tmb = keep_tmb, ...)
     if (inherits(out, 'try-error')) {
         if (!object$model$variance_targeting) {
             warning("\ndefault model failed. Trying with variance targeting turned on.")
             new_spec <- .modelspec.tsgarch.spec(object, variance_targeting = TRUE)
-            out <- estimate(new_spec, solver = solver, control = control, stationarity_constraint = stationarity_constraint, ...)
+            out <- estimate(new_spec, solver = solver, control = control, stationarity_constraint = stationarity_constraint, keep_tmb = keep_tmb, ...)
         }
     }
     end_timer <- Sys.time()
@@ -76,10 +89,13 @@ coef.tsgarch.estimate <- function(object, ...)
 #' Extract Volatility (Conditional Standard Deviation)
 #'
 #' @description Extract the conditional standard deviation from a GARCH model.
-#' @param object an object of class \dQuote{tsgarch.estimate}, \dQuote{tsgarch.predict}
-#' or \dQuote{tsgarch.simulate}.
+#' @param object an object of class \dQuote{tsgarch.estimate}, \dQuote{tsgarch.predict},
+#' \dQuote{tsgarch.simulate} or a \dQuote{tsgarch.multi_estimate}.
 #' @param ... not currently used.
-#' @returns An xts vector of the conditional volatility.
+#' @returns An xts vector of the conditional volatility for the univariate type
+#' objects. In the case of a multi-estimate object, a list of xts vectors is
+#' returned if the individual univariate objects have unequal indices, else an
+#' xts matrix is returned.
 #' @aliases sigma
 #' @method sigma tsgarch.estimate
 #' @rdname sigma
@@ -93,14 +109,32 @@ sigma.tsgarch.estimate <- function(object, ...)
     return(out)
 }
 
+#' @method sigma tsgarch.multi_estimate
+#' @rdname sigma
+#' @export
+#'
+sigma.tsgarch.multi_estimate <- function(object, ...)
+{
+    out <- lapply(object, sigma)
+    if (attr(object, "index_match") == TRUE) {
+        out <- do.call(cbind, out)
+        colnames(out) <- names(object)
+    } else {
+        names(out) <- names(object)
+    }
+    return(out)
+}
+
 #' Extract Model Fitted Values
 #'
 #' @description Extract the fitted values of the estimated model.
-#' @param object an object of class \dQuote{tsgarch.estimate}.
+#' @param object an object of class \dQuote{tsgarch.estimate} or
+#' \dQuote{tsgarch.multi_estimate}.
 #' @param ... not currently used.
-#' @returns An xts vector of the fitted values. Since only a constant is supported
-#' in the conditional mean equation this is either a vector with a constant else
-#' a vector with zeros.
+#' @returns An xts vector of the fitted values for the univariate type
+#' objects. In the case of a multi-estimate object, a list of xts vectors is
+#' returned if the individual univariate objects have unequal indices, else an
+#' xts matrix is returned.
 #' @aliases fitted
 #' @method fitted tsgarch.estimate
 #' @rdname fitted
@@ -117,16 +151,34 @@ fitted.tsgarch.estimate <- function(object, ...)
     return(f)
 }
 
+
+#' @method fitted tsgarch.multi_estimate
+#' @rdname fitted
+#' @export
+#'
+#'
+fitted.tsgarch.multi_estimate <- function(object, ...)
+{
+    out <- do.call(cbind, lapply(object, fitted))
+    colnames(out) <- names(object)
+    return(out)
+}
+
+
 #' Extract Model Residuals
 #'
 #' @description Extract the residuals of the estimated model.
-#' @param object an object of class \dQuote{tsgarch.estimate}.
+#' @param object an object of class \dQuote{tsgarch.estimate} or
+#' \dQuote{tsgarch.multi_estimate}.
 #' @param standardize logical. Whether to standardize the residuals by the
 #' conditional volatility.
 #' @param ... not currently used.
-#' @returns An xts vector of the residuals. If the model had no constant in
-#' the conditional mean equation then this just returns the original data (which
-#' is assumed to be zero mean noise).
+#' @returns An xts vector of the model residuals for the univariate type
+#' objects. In the case of a multi-estimate object, a list of xts vectors is
+#' returned if the individual univariate objects have unequal indices, else an
+#' xts matrix is returned.
+#' Note that If the model had no constant in the conditional mean equation then this
+#' just returns the original data (which is assumed to be zero mean noise).
 #' @aliases residuals
 #' @method residuals tsgarch.estimate
 #' @rdname residuals
@@ -144,6 +196,20 @@ residuals.tsgarch.estimate <- function(object, standardize = FALSE, ...)
     colnames(res) <- ".residuals"
     return(res)
 }
+
+
+#' @method residuals tsgarch.multi_estimate
+#' @rdname residuals
+#' @export
+#'
+#'
+residuals.tsgarch.multi_estimate <- function(object, standardize = FALSE, ...)
+{
+    out <- do.call(cbind, lapply(object, residuals, standardize = standardize))
+    colnames(out) <- names(object)
+    return(out)
+}
+
 
 #' The Covariance Matrix of the Estimated Parameters
 #'
@@ -795,7 +861,7 @@ predict.tsgarch.estimate <- function(object, h = 1, newxreg = NULL, newvreg = NU
     }
     sim_method <- match.arg(sim_method[1], c("parametric","bootstrap"))
     h <- max(1, as.integer(h[1]))
-    if (h == 1) nsim <- 0
+    #if (h == 1) nsim <- 0
     nsim <- max(0, as.integer(nsim[1]))
     block <- max(0, as.integer(block[1]))
     model <- object$spec$model$model
